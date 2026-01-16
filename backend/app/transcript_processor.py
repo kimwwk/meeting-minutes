@@ -116,8 +116,10 @@ class TranscriptProcessor:
                 llm = AnthropicModel(model_name, provider=AnthropicProvider(api_key=api_key))
                 logger.info(f"Using Claude model: {model_name}")
             elif model == "ollama":
-                # Use environment variable for Ollama host configuration
-                ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
+                # Check DB first, then environment variable, then default
+                ollama_host = await db.get_ollama_host()
+                if not ollama_host:
+                    ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
                 ollama_base_url = f"{ollama_host}/v1"
                 ollama_model = OpenAIModel(
                     model_name=model_name, provider=OpenAIProvider(base_url=ollama_base_url)
@@ -255,7 +257,10 @@ class TranscriptProcessor:
         }
 
         # Create a client and track it for cleanup
-        ollama_host = os.getenv('OLLAMA_HOST', 'http://127.0.0.1:11434')
+        # Check DB first, then environment variable, then default
+        ollama_host = await db.get_ollama_host()
+        if not ollama_host:
+            ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
         client = AsyncClient(host=ollama_host)
         self.active_clients.append(client)
         

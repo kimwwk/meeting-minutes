@@ -1,0 +1,68 @@
+version: '3.8'
+
+# =============================================================================
+# Meetily Backend API - Standalone Deployment
+# =============================================================================
+#
+# Use this compose file to deploy ONLY the backend API.
+# Whisper and Ollama should be running on RunPod (or another GPU host).
+#
+# Required Environment Variables:
+#   OLLAMA_HOST - URL to your RunPod Ollama instance
+#
+# Usage:
+#   export OLLAMA_HOST=http://<runpod-ip>:11434
+#   docker compose -f docker-compose.backend-only.yml up -d
+#
+# =============================================================================
+
+services:
+  meetily-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    image: meetily-backend:latest
+    container_name: meetily-backend
+    restart: unless-stopped
+
+    ports:
+      - "${APP_PORT:-5167}:5167"
+
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+      - DATABASE_PATH=/app/data/meeting_minutes.db
+      # Point to your RunPod Ollama instance
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://localhost:11434}
+      # Optional: API keys for cloud LLM providers
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+
+    volumes:
+      # Database persistence
+      - ./data:/app/data
+      # Logs
+      - backend_logs:/app/logs
+      # Optional: mount .env file
+      - ${LOCAL_ENV_FILE:-./app/.env}:/app/.env:ro
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5167/get-meetings"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    mem_limit: 2g
+    mem_reservation: 512m
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  backend_logs:
+    driver: local

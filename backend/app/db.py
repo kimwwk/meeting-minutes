@@ -138,9 +138,16 @@ class DatabaseManager:
                     groqApiKey TEXT,
                     openaiApiKey TEXT,
                     anthropicApiKey TEXT,
-                    ollamaApiKey TEXT
+                    ollamaApiKey TEXT,
+                    ollamaHost TEXT
                 )
             """)
+
+            # Migration: Add ollamaHost column if it doesn't exist (for existing DBs)
+            try:
+                cursor.execute("ALTER TABLE settings ADD COLUMN ollamaHost TEXT")
+            except Exception:
+                pass  # Column already exists
 
             # Create transcript_settings table
             cursor.execute("""
@@ -530,11 +537,18 @@ class DatabaseManager:
     async def get_model_config(self):
         """Get the current model configuration"""
         async with self._get_connection() as conn:
-            cursor = await conn.execute("SELECT provider, model, whisperModel FROM settings")
+            cursor = await conn.execute("SELECT provider, model, whisperModel, ollamaHost FROM settings")
             row = await cursor.fetchone()
             return dict(zip([col[0] for col in cursor.description], row)) if row else None
 
-    async def save_model_config(self, provider: str, model: str, whisperModel: str):
+    async def get_ollama_host(self):
+        """Get the Ollama host URL from settings"""
+        async with self._get_connection() as conn:
+            cursor = await conn.execute("SELECT ollamaHost FROM settings WHERE id = '1'")
+            row = await cursor.fetchone()
+            return row[0] if row and row[0] else None
+
+    async def save_model_config(self, provider: str, model: str, whisperModel: str, ollamaHost: str = None):
         """Save the model configuration"""
         # Input validation
         if not provider or not provider.strip():
@@ -543,11 +557,11 @@ class DatabaseManager:
             raise ValueError("Model cannot be empty")
         if not whisperModel or not whisperModel.strip():
             raise ValueError("Whisper model cannot be empty")
-            
+
         try:
             async with self._get_connection() as conn:
                 await conn.execute("BEGIN TRANSACTION")
-                
+
                 try:
                     # Check if the configuration already exists
                     cursor = await conn.execute("SELECT id FROM settings")
@@ -555,25 +569,25 @@ class DatabaseManager:
                     if existing_config:
                         # Update existing configuration
                         await conn.execute("""
-                            UPDATE settings 
-                            SET provider = ?, model = ?, whisperModel = ?
-                            WHERE id = '1'    
-                        """, (provider, model, whisperModel))
+                            UPDATE settings
+                            SET provider = ?, model = ?, whisperModel = ?, ollamaHost = ?
+                            WHERE id = '1'
+                        """, (provider, model, whisperModel, ollamaHost))
                     else:
                         # Insert new configuration
                         await conn.execute("""
-                            INSERT INTO settings (id, provider, model, whisperModel)
-                            VALUES (?, ?, ?, ?)
-                        """, ('1', provider, model, whisperModel))
-                    
+                            INSERT INTO settings (id, provider, model, whisperModel, ollamaHost)
+                            VALUES (?, ?, ?, ?, ?)
+                        """, ('1', provider, model, whisperModel, ollamaHost))
+
                     await conn.commit()
-                    logger.info(f"Successfully saved model configuration: {provider}/{model}")
-                    
+                    logger.info(f"Successfully saved model configuration: {provider}/{model}, ollamaHost={ollamaHost}")
+
                 except Exception as e:
                     await conn.rollback()
                     logger.error(f"Failed to save model configuration: {str(e)}", exc_info=True)
                     raise
-                    
+
         except Exception as e:
             logger.error(f"Database connection error in save_model_config: {str(e)}", exc_info=True)
             raise
