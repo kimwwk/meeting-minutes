@@ -41,9 +41,28 @@ app = FastAPI(
 )
 
 # Configure CORS
+import os
+cors_origins_env = os.getenv("CORS_ORIGINS", "")
+if cors_origins_env:
+    cors_origins = [origin.strip() for origin in cors_origins_env.split(",")]
+else:
+    cors_origins = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        # Production web
+        "https://recording.getjustgo.com",
+        # Tauri 
+        "tauri://localhost",
+        "https://tauri.localhost",
+        # Capacitor
+        "capacitor://localhost",      # iOS
+        "http://localhost",           # Android
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],     # Allow all origins for testing
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],     # Allow all methods
     allow_headers=["*"],     # Allow all headers
