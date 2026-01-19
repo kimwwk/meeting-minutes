@@ -7,6 +7,7 @@ from .config import DiarizationConfig
 from .audio_utils import AudioConverter
 from .diarization import DiarizationService
 from .whisper_client import WhisperClient
+from .speaker_tracker import SpeakerTracker
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +20,9 @@ class AudioProcessor:
     1. Receive audio file
     2. Forward to whisper.cpp for transcription
     3. Run pyannote for speaker diarization
-    4. Merge results by time overlap
-    5. Return segments with speaker labels
+    4. Use speaker tracker for consistent IDs across chunks (if session_id provided)
+    5. Merge results by time overlap
+    6. Return segments with speaker labels
     """
 
     def __init__(self, config: DiarizationConfig):
@@ -43,9 +45,19 @@ class AudioProcessor:
             device=config.device_str
         )
 
+        # Initialize speaker tracker for cross-chunk consistency
+        # Persist embeddings to workspace if available
+        persist_dir = "/workspace/speaker_embeddings" if os.path.exists("/workspace") else None
+        self.speaker_tracker = SpeakerTracker(
+            auth_token=config.hf_auth_token,
+            device=config.device_str,
+            persist_dir=persist_dir
+        )
+
         logger.info(f"AudioProcessor initialized")
         logger.info(f"  Whisper server: {config.whisper_server_url}")
         logger.info(f"  Diarization available: {self.diarization_service.is_available}")
+        logger.info(f"  Speaker tracking available: {self.speaker_tracker.is_available}")
         logger.info(f"  Device: {config.device_str}")
 
     @property
@@ -53,10 +65,16 @@ class AudioProcessor:
         """Check if diarization is available."""
         return self.diarization_service.is_available
 
+    @property
+    def speaker_tracking_available(self) -> bool:
+        """Check if speaker tracking is available."""
+        return self.speaker_tracker.is_available
+
     async def process_audio(
         self,
         audio_path: str,
-        enable_diarization: bool = True
+        enable_diarization: bool = True,
+        session_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Process audio file with transcription and optional diarization.
@@ -64,6 +82,7 @@ class AudioProcessor:
         Args:
             audio_path: Path to the audio file
             enable_diarization: Whether to run speaker diarization
+            session_id: Optional session/meeting ID for cross-chunk speaker tracking
 
         Returns:
             List of segments with format:
@@ -104,6 +123,15 @@ class AudioProcessor:
                         temp_wav_path
                     )
                     logger.info(f"Got {len(diarization_turns)} speaker turns")
+
+                    # Step 2b: Apply speaker tracking for consistent IDs
+                    if session_id and self.speaker_tracker.is_available and diarization_turns:
+                        logger.info(f"Step 2b: Applying speaker tracking for session {session_id}")
+                        diarization_turns = self.speaker_tracker.assign_speakers(
+                            session_id=session_id,
+                            audio_path=temp_wav_path,
+                            diarization_turns=diarization_turns
+                        )
                 else:
                     logger.warning("Audio conversion failed, skipping diarization")
             else:
@@ -196,3 +224,11 @@ class AudioProcessor:
             List of transcription segments (no speaker labels)
         """
         return await self.whisper_client.transcribe(audio_path)
+
+    def get_session_speakers(self, session_id: str) -> List[Dict[str, Any]]:
+        """Get summary of speakers in a session."""
+        return self.speaker_tracker.get_session_speakers(session_id)
+
+    def clear_session(self, session_id: str):
+        """Clear a session's speaker tracking data."""
+        self.speaker_tracker.clear_session(session_id)

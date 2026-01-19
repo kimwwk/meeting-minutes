@@ -99,11 +99,16 @@ async def root():
     """Root endpoint - basic service info."""
     return {
         "service": "Diarization Service",
-        "version": "1.0.0",
+        "version": "2.0.0",
+        "features": {
+            "speaker_tracking": "Consistent speaker IDs across chunks using embeddings"
+        },
         "endpoints": {
             "/health": "Service health check",
-            "/inference": "Transcribe with diarization (whisper.cpp compatible)",
-            "/transcribe": "Transcribe with diarization"
+            "/inference": "Transcribe with diarization (pass session_id for cross-chunk tracking)",
+            "/transcribe": "Transcribe with diarization",
+            "/session/{session_id}/speakers": "Get speaker summary for a session",
+            "/session/{session_id}": "DELETE to clear session data"
         }
     }
 
@@ -115,11 +120,13 @@ async def health():
 
     whisper_ok = False
     diarization_ok = False
+    speaker_tracking_ok = False
 
     if processor:
         # Check whisper server
         whisper_ok = await processor.whisper_client.health_check()
         diarization_ok = processor.diarization_available
+        speaker_tracking_ok = processor.speaker_tracking_available
 
     status = "ok" if (whisper_ok and diarization_ok) else (
         "degraded" if whisper_ok else "error"
@@ -129,7 +136,8 @@ async def health():
         "status": status,
         "services": {
             "whisper_server": "ok" if whisper_ok else "unavailable",
-            "diarization": "ok" if diarization_ok else "unavailable"
+            "diarization": "ok" if diarization_ok else "unavailable",
+            "speaker_tracking": "ok" if speaker_tracking_ok else "unavailable"
         },
         "config": {
             "whisper_url": processor.config.whisper_server_url if processor else None,
@@ -145,6 +153,7 @@ async def inference(
     response_format: str = Form("json"),
     diarize: bool = Form(True),
     temperature: Optional[str] = Form("0.0"),
+    session_id: Optional[str] = Form(None),
 ):
     """
     Transcribe audio with optional speaker diarization.
@@ -157,6 +166,9 @@ async def inference(
         response_format: Response format (only 'json' supported)
         diarize: Enable speaker diarization (default True)
         temperature: Whisper temperature parameter (passed through)
+        session_id: Optional session/meeting ID for consistent speaker tracking across chunks.
+                   Pass the same session_id for all chunks of the same meeting to maintain
+                   consistent speaker labels (SPEAKER_00, SPEAKER_01, etc.) throughout.
 
     Returns:
         JSON with transcription segments including speaker labels
@@ -180,12 +192,14 @@ async def inference(
             content = await file.read()
             f.write(content)
 
-        logger.info(f"Processing file: {file.filename} ({len(content)} bytes)")
+        logger.info(f"Processing file: {file.filename} ({len(content)} bytes)" +
+                   (f" [session: {session_id}]" if session_id else ""))
 
-        # Process audio
+        # Process audio with optional session tracking
         segments = await processor.process_audio(
             audio_path=str(temp_path),
-            enable_diarization=diarize
+            enable_diarization=diarize,
+            session_id=session_id
         )
 
         if not segments:
@@ -223,6 +237,7 @@ async def inference(
 async def transcribe(
     file: UploadFile = File(...),
     diarize: bool = Form(True),
+    session_id: Optional[str] = Form(None),
 ):
     """
     Transcribe audio with speaker diarization.
@@ -232,11 +247,67 @@ async def transcribe(
     Args:
         file: Audio file to transcribe
         diarize: Enable speaker diarization (default True)
+        session_id: Optional session/meeting ID for consistent speaker tracking
 
     Returns:
         JSON with transcription segments including speaker labels
     """
-    return await inference(file=file, response_format="json", diarize=diarize)
+    return await inference(file=file, response_format="json", diarize=diarize, session_id=session_id)
+
+
+@app.get("/session/{session_id}/speakers")
+async def get_session_speakers(session_id: str):
+    """
+    Get speaker information for a session.
+
+    Returns summary of all speakers detected in the session,
+    including their total speaking duration and number of chunks.
+
+    Args:
+        session_id: Session/meeting ID
+
+    Returns:
+        List of speaker summaries
+    """
+    global processor
+
+    if not processor:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+
+    speakers = processor.get_session_speakers(session_id)
+
+    return {
+        "session_id": session_id,
+        "speakers": speakers,
+        "speaker_count": len(speakers)
+    }
+
+
+@app.delete("/session/{session_id}")
+async def clear_session(session_id: str):
+    """
+    Clear speaker tracking data for a session.
+
+    Call this when a meeting ends to free memory.
+    Embeddings are also removed from disk if persistence is enabled.
+
+    Args:
+        session_id: Session/meeting ID to clear
+
+    Returns:
+        Confirmation message
+    """
+    global processor
+
+    if not processor:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+
+    processor.clear_session(session_id)
+
+    return {
+        "status": "ok",
+        "message": f"Session {session_id} cleared"
+    }
 
 
 if __name__ == "__main__":
