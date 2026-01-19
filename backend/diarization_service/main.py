@@ -154,6 +154,7 @@ async def inference(
     diarize: bool = Form(True),
     temperature: Optional[str] = Form("0.0"),
     session_id: Optional[str] = Form(None),
+    num_speakers: Optional[int] = Form(None),
 ):
     """
     Transcribe audio with optional speaker diarization.
@@ -169,6 +170,8 @@ async def inference(
         session_id: Optional session/meeting ID for consistent speaker tracking across chunks.
                    Pass the same session_id for all chunks of the same meeting to maintain
                    consistent speaker labels (SPEAKER_00, SPEAKER_01, etc.) throughout.
+        num_speakers: Optional hint for number of speakers. If provided, won't create more
+                     than this many speakers (helps avoid false speaker creation).
 
     Returns:
         JSON with transcription segments including speaker labels
@@ -193,13 +196,15 @@ async def inference(
             f.write(content)
 
         logger.info(f"Processing file: {file.filename} ({len(content)} bytes)" +
-                   (f" [session: {session_id}]" if session_id else ""))
+                   (f" [session: {session_id}]" if session_id else "") +
+                   (f" [speakers: {num_speakers}]" if num_speakers else ""))
 
         # Process audio with optional session tracking
         segments = await processor.process_audio(
             audio_path=str(temp_path),
             enable_diarization=diarize,
-            session_id=session_id
+            session_id=session_id,
+            num_speakers=num_speakers
         )
 
         if not segments:

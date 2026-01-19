@@ -74,7 +74,8 @@ class AudioProcessor:
         self,
         audio_path: str,
         enable_diarization: bool = True,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        num_speakers: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
         Process audio file with transcription and optional diarization.
@@ -126,11 +127,13 @@ class AudioProcessor:
 
                     # Step 2b: Apply speaker tracking for consistent IDs
                     if session_id and self.speaker_tracker.is_available and diarization_turns:
-                        logger.info(f"Step 2b: Applying speaker tracking for session {session_id}")
+                        logger.info(f"Step 2b: Applying speaker tracking for session {session_id}" +
+                                   (f" (max {num_speakers} speakers)" if num_speakers else ""))
                         diarization_turns = self.speaker_tracker.assign_speakers(
                             session_id=session_id,
                             audio_path=temp_wav_path,
-                            diarization_turns=diarization_turns
+                            diarization_turns=diarization_turns,
+                            num_speakers=num_speakers
                         )
                 else:
                     logger.warning("Audio conversion failed, skipping diarization")

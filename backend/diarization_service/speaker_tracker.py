@@ -10,7 +10,10 @@ import torch
 logger = logging.getLogger(__name__)
 
 # Similarity threshold for matching speakers (cosine similarity)
-SPEAKER_MATCH_THRESHOLD = 0.65
+SPEAKER_MATCH_THRESHOLD = 0.60
+
+# Minimum duration (seconds) to persist embedding (skip noisy short segments)
+MIN_DURATION_TO_PERSIST = 1.5
 
 
 @dataclass
@@ -291,7 +294,8 @@ class SpeakerTracker:
         self,
         session_id: str,
         audio_path: str,
-        diarization_turns: List[Dict[str, Any]]
+        diarization_turns: List[Dict[str, Any]],
+        num_speakers: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
         Assign consistent speaker IDs to diarization turns using embeddings.
@@ -353,16 +357,28 @@ class SpeakerTracker:
                 label_mapping[local_label] = match_id
                 logger.debug(f"Matched {local_label} -> {match_id} (similarity: {similarity:.3f})")
 
-                # Update the speaker's embedding with new observation
-                self.store.add_speaker(session_id, match_id, embedding, duration)
+                # Only persist embedding if duration is good (skip noisy short segments)
+                if duration >= MIN_DURATION_TO_PERSIST:
+                    self.store.add_speaker(session_id, match_id, embedding, duration)
             else:
-                # New speaker - create new ID
-                new_id = self.store.get_next_speaker_id(session_id)
-                label_mapping[local_label] = new_id
-                logger.info(f"New speaker: {local_label} -> {new_id} (best similarity: {similarity:.3f})")
+                # Check if we've hit the speaker limit (if user specified num_speakers)
+                profiles = self.store.get_session(session_id)
+                if num_speakers and len(profiles) >= num_speakers:
+                    # At limit - assign to best match even if below threshold
+                    if match_id:
+                        label_mapping[local_label] = match_id
+                        logger.debug(f"At speaker limit, using best match: {local_label} -> {match_id} (similarity: {similarity:.3f})")
+                    else:
+                        label_mapping[local_label] = "SPEAKER_00"
+                else:
+                    # New speaker
+                    new_id = self.store.get_next_speaker_id(session_id)
+                    label_mapping[local_label] = new_id
+                    logger.info(f"New speaker: {local_label} -> {new_id} (best similarity: {similarity:.3f})")
 
-                # Add to store
-                self.store.add_speaker(session_id, new_id, embedding, duration)
+                    # Only persist if duration is good
+                    if duration >= MIN_DURATION_TO_PERSIST:
+                        self.store.add_speaker(session_id, new_id, embedding, duration)
 
         # Apply mapping to all turns
         updated_turns = []
