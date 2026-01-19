@@ -42,7 +42,7 @@ class WhisperClient:
                 with open(audio_path, "rb") as audio_file:
                     files = {"file": ("audio.wav", audio_file, "audio/wav")}
                     data = {
-                        "response_format": "json",
+                        "response_format": "verbose_json",
                         "temperature": "0.0",
                     }
 
@@ -54,9 +54,12 @@ class WhisperClient:
                     response.raise_for_status()
 
             result = response.json()
+            logger.debug(f"Whisper raw response keys: {result.keys() if isinstance(result, dict) else type(result)}")
             segments = self._parse_whisper_response(result)
 
             logger.info(f"Whisper transcription complete: {len(segments)} segments")
+            if segments:
+                logger.debug(f"First segment: start={segments[0].get('start')}, end={segments[0].get('end')}")
             return segments
 
         except httpx.TimeoutException:
