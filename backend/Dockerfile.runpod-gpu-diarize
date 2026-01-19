@@ -27,13 +27,19 @@ RUN apt-get update && apt-get install -y \
 
 # -----------------------------------------------------------------------------
 # 2. Install Python dependencies for diarization service
+# NOTE: Version pins are critical for pyannote compatibility:
+#   - torch<2.6: PyTorch 2.6+ changed weights_only=True default breaking pyannote
+#   - huggingface_hub<0.23: 0.23+ deprecated use_auth_token parameter
 # -----------------------------------------------------------------------------
 RUN pip install --no-cache-dir \
     fastapi>=0.115.0 \
     "uvicorn[standard]>=0.34.0" \
     python-multipart>=0.0.9 \
     httpx>=0.27.0 \
-    pyannote.audio>=3.1.0
+    "torch<2.6" \
+    "torchaudio<2.6" \
+    "huggingface_hub>=0.20.0,<0.23.0" \
+    "pyannote.audio>=3.1.0,<4.0"
 
 # -----------------------------------------------------------------------------
 # 3. Create Scripts Directory
@@ -45,7 +51,7 @@ RUN cat > /opt/meetily/setup-gpu-services.sh << 'SETUP_EOF'
 #!/bin/bash
 set -e
 
-SETUP_MARKER="/workspace/.setup_complete_v2"
+SETUP_MARKER="/workspace/.setup_complete_diarize_v1"
 
 if [ -f "$SETUP_MARKER" ]; then
     echo "Setup already complete. Skipping..."
@@ -56,11 +62,11 @@ echo "============================================"
 echo "  First Boot Setup - This takes ~10-15 min"
 echo "============================================"
 
-# Clone repo if not present
+# Clone repo if not present (using fork with diarization feature)
 if [ ! -d "/workspace/meeting-minutes" ]; then
-    echo "Cloning repository..."
+    echo "Cloning repository (fork with diarization)..."
     cd /workspace
-    git clone https://github.com/Zackriya-Solutions/meeting-minutes.git
+    git clone -b feat/speaker-diarization https://github.com/kimwwk/meeting-minutes.git
     cd meeting-minutes
     git submodule update --init --recursive
 fi
