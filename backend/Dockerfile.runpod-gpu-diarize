@@ -1,11 +1,11 @@
 # =============================================================================
 # Meetily RunPod GPU Services - With Speaker Diarization
-# Whisper.cpp + Pyannote Speaker Diarization + Ollama
+# Whisper.cpp + Pyannote Speaker Diarization
 # =============================================================================
 FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 LABEL maintainer="Meetily"
-LABEL description="GPU-accelerated Whisper + Speaker Diarization + Ollama"
+LABEL description="GPU-accelerated Whisper + Speaker Diarization"
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV WHISPER_MODEL=base.en
@@ -51,15 +51,21 @@ RUN cat > /opt/meetily/setup-gpu-services.sh << 'SETUP_EOF'
 #!/bin/bash
 set -e
 
-SETUP_MARKER="/workspace/.setup_complete_diarize_v1"
+SETUP_MARKER="/workspace/.setup_complete_diarize_v3"
 
 if [ -f "$SETUP_MARKER" ]; then
     echo "Setup already complete. Skipping..."
+    # Still pull latest code changes
+    if [ -d "/workspace/meeting-minutes" ]; then
+        echo "Pulling latest code..."
+        cd /workspace/meeting-minutes
+        git pull --ff-only 2>/dev/null || echo "Git pull skipped (uncommitted changes)"
+    fi
     exit 0
 fi
 
 echo "============================================"
-echo "  First Boot Setup - This takes ~10-15 min"
+echo "  First Boot Setup"
 echo "============================================"
 
 # Clone repo if not present (using fork with diarization feature)
@@ -69,6 +75,10 @@ if [ ! -d "/workspace/meeting-minutes" ]; then
     git clone -b feat/speaker-diarization https://github.com/kimwwk/meeting-minutes.git
     cd meeting-minutes
     git submodule update --init --recursive
+else
+    echo "Repository exists, pulling latest..."
+    cd /workspace/meeting-minutes
+    git pull --ff-only
 fi
 
 # Build whisper.cpp with CUDA
@@ -90,12 +100,6 @@ echo "Downloading Whisper model (${WHISPER_MODEL})..."
 mkdir -p /workspace/meeting-minutes/backend/models
 wget -q --show-progress -O "/workspace/meeting-minutes/backend/models/ggml-${WHISPER_MODEL}.bin" \
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${WHISPER_MODEL}.bin"
-
-# Install Ollama
-if ! command -v ollama &> /dev/null; then
-    echo "Installing Ollama..."
-    curl -fsSL https://ollama.com/install.sh | sh
-fi
 
 # Pre-download pyannote model if HF token is set
 if [ -n "$HF_AUTH_TOKEN" ]; then
@@ -129,26 +133,10 @@ echo "Starting Meetily GPU Services with Diarization..."
 # Run setup if first boot
 /opt/meetily/setup-gpu-services.sh
 
-# Re-install Ollama if missing (RunPod clears /usr on restart)
-if ! command -v ollama &> /dev/null; then
-    echo "Ollama not found. Reinstalling..."
-    curl -fsSL https://ollama.com/install.sh | sh
-fi
-
 # Set environment
 export WHISPER_MODEL=${WHISPER_MODEL:-base.en}
-export OLLAMA_HOST=0.0.0.0:11434
 export WHISPER_SERVER_URL=http://localhost:8178
 export HF_AUTH_TOKEN=${HF_AUTH_TOKEN:-}
-
-# Start Ollama
-echo "Starting Ollama on port 11434..."
-ollama serve &
-sleep 5
-
-# Pull Ollama model
-echo "Pulling Ollama model (llama3.2:3b)..."
-ollama pull llama3.2:3b 2>/dev/null || true
 
 # Start Whisper server
 echo "Starting Whisper server on port 8178..."
@@ -182,7 +170,6 @@ echo "  Meetily GPU Services Started!"
 echo "==========================================="
 echo "  Whisper:      http://0.0.0.0:8178"
 echo "  Diarization:  http://0.0.0.0:8179"
-echo "  Ollama:       http://0.0.0.0:11434"
 echo "==========================================="
 echo ""
 echo "Usage:"
@@ -215,13 +202,6 @@ if [ -n "$DIARIZE_HEALTH" ]; then
 else
     echo "Diarization (8179): FAILED"
 fi
-
-# Test Ollama
-if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
-    echo "Ollama (11434): OK"
-else
-    echo "Ollama (11434): FAILED"
-fi
 TEST_EOF
 
 RUN chmod +x /opt/meetily/*.sh
@@ -229,6 +209,6 @@ RUN chmod +x /opt/meetily/*.sh
 # -----------------------------------------------------------------------------
 # 4. Expose Ports
 # -----------------------------------------------------------------------------
-EXPOSE 8178 8179 11434
+EXPOSE 8178 8179
 
 CMD ["/opt/meetily/start-gpu-services.sh"]
