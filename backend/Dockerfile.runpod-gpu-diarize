@@ -1,0 +1,266 @@
+# =============================================================================
+# Meetily RunPod GPU Services - With Speaker Diarization + Ollama
+# Whisper.cpp + Pyannote Speaker Diarization + Ollama LLM
+# =============================================================================
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+
+LABEL maintainer="Meetily"
+LABEL description="GPU-accelerated Whisper + Speaker Diarization + Ollama"
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV WHISPER_MODEL=base.en
+ENV OLLAMA_MODEL=llama3.2:3b
+
+# -----------------------------------------------------------------------------
+# 1. Install System Dependencies
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    wget \
+    curl \
+    ffmpeg \
+    pkg-config \
+    libsdl2-dev \
+    zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# 2. Install Python dependencies for diarization service
+# NOTE: Version pins are critical for pyannote compatibility:
+#   - torch<2.6: PyTorch 2.6+ changed weights_only=True default breaking pyannote
+#   - huggingface_hub<0.23: 0.23+ deprecated use_auth_token parameter
+# -----------------------------------------------------------------------------
+RUN pip install --no-cache-dir \
+    fastapi>=0.115.0 \
+    "uvicorn[standard]>=0.34.0" \
+    python-multipart>=0.0.9 \
+    httpx>=0.27.0 \
+    "torch<2.6" \
+    "torchaudio<2.6" \
+    "huggingface_hub>=0.20.0,<0.23.0" \
+    "pyannote.audio>=3.1.0,<4.0"
+
+# -----------------------------------------------------------------------------
+# 3. Create Scripts Directory
+# -----------------------------------------------------------------------------
+RUN mkdir -p /opt/meetily
+
+# Setup script - runs once on first boot
+RUN cat > /opt/meetily/setup-gpu-services.sh << 'SETUP_EOF'
+#!/bin/bash
+set -e
+
+SETUP_MARKER="/workspace/.setup_complete_diarize_v3"
+
+if [ -f "$SETUP_MARKER" ]; then
+    echo "Setup already complete. Skipping..."
+    # Still pull latest code changes
+    if [ -d "/workspace/meeting-minutes" ]; then
+        echo "Pulling latest code..."
+        cd /workspace/meeting-minutes
+        git pull --ff-only 2>/dev/null || echo "Git pull skipped (uncommitted changes)"
+    fi
+    exit 0
+fi
+
+echo "============================================"
+echo "  First Boot Setup"
+echo "============================================"
+
+# Clone repo if not present (using fork with diarization feature)
+if [ ! -d "/workspace/meeting-minutes" ]; then
+    echo "Cloning repository (fork with diarization)..."
+    cd /workspace
+    git clone -b feat/speaker-diarization https://github.com/kimwwk/meeting-minutes.git
+    cd meeting-minutes
+    git submodule update --init --recursive
+else
+    echo "Repository exists, pulling latest..."
+    cd /workspace/meeting-minutes
+    git pull --ff-only
+fi
+
+# Build whisper.cpp with CUDA
+echo "Building whisper.cpp with CUDA support..."
+cd /workspace/meeting-minutes/backend/whisper.cpp
+cmake -B build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DWHISPER_BUILD_SERVER=ON \
+    -DWHISPER_BUILD_EXAMPLES=ON \
+    -DWHISPER_BUILD_TESTS=OFF \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DGGML_STATIC=ON \
+    -DGGML_CUDA=ON \
+    -DGGML_NATIVE=OFF
+cmake --build build --config Release --target whisper-server -j$(nproc)
+
+# Download Whisper model
+echo "Downloading Whisper model (${WHISPER_MODEL})..."
+mkdir -p /workspace/meeting-minutes/backend/models
+wget -q --show-progress -O "/workspace/meeting-minutes/backend/models/ggml-${WHISPER_MODEL}.bin" \
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${WHISPER_MODEL}.bin"
+
+# Pre-download pyannote model if HF token is set
+if [ -n "$HF_AUTH_TOKEN" ]; then
+    echo "Pre-loading pyannote diarization model..."
+    python3 -c "
+from pyannote.audio import Pipeline
+import os
+try:
+    pipeline = Pipeline.from_pretrained(
+        'pyannote/speaker-diarization-3.1',
+        use_auth_token=os.environ.get('HF_AUTH_TOKEN')
+    )
+    print('Pyannote model loaded successfully')
+except Exception as e:
+    print(f'Warning: Could not pre-load pyannote model: {e}')
+"
+else
+    echo "Warning: HF_AUTH_TOKEN not set. Pyannote model will be loaded on first use."
+fi
+
+# Install Ollama if not present
+if [ ! -f "/usr/local/bin/ollama" ]; then
+    echo "Installing Ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh
+fi
+
+# Pull Ollama models
+echo "Starting Ollama to pull models..."
+ollama serve &
+OLLAMA_PID=$!
+sleep 5
+
+echo "Pulling Ollama model: llama3.2:3b..."
+ollama pull llama3.2:3b || echo "Warning: Could not pull llama3.2:3b"
+
+echo "Pulling Ollama model: deepseek-r1:32b..."
+ollama pull deepseek-r1:32b || echo "Warning: Could not pull deepseek-r1:32b"
+
+kill $OLLAMA_PID 2>/dev/null || true
+
+touch "$SETUP_MARKER"
+echo "Setup complete!"
+SETUP_EOF
+
+# Start script - runs setup if needed, then starts services
+RUN cat > /opt/meetily/start-gpu-services.sh << 'START_EOF'
+#!/bin/bash
+
+echo "Starting Meetily GPU Services with Diarization + Ollama..."
+
+# Run setup if first boot
+/opt/meetily/setup-gpu-services.sh
+
+# Set environment
+export WHISPER_MODEL=${WHISPER_MODEL:-base.en}
+export OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
+export WHISPER_SERVER_URL=http://localhost:8178
+export HF_AUTH_TOKEN=${HF_AUTH_TOKEN:-}
+
+# Start Ollama server
+echo "Starting Ollama server on port 11434..."
+ollama serve &
+
+# Wait for Ollama to be ready
+echo "Waiting for Ollama server..."
+for i in {1..30}; do
+    if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+        echo "Ollama server is ready"
+        break
+    fi
+    sleep 1
+done
+
+# Ensure models are pulled
+echo "Ensuring Ollama models are available..."
+ollama pull llama3.2:3b 2>/dev/null || echo "llama3.2:3b already available"
+ollama pull deepseek-r1:32b 2>/dev/null || echo "deepseek-r1:32b already available or downloading"
+
+# Start Whisper server
+echo "Starting Whisper server on port 8178..."
+cd /workspace/meeting-minutes/backend/whisper.cpp
+./build/bin/whisper-server \
+    --model /workspace/meeting-minutes/backend/models/ggml-${WHISPER_MODEL}.bin \
+    --host 0.0.0.0 \
+    --port 8178 \
+    --threads 4 &
+
+# Wait for Whisper server to be ready
+echo "Waiting for Whisper server..."
+for i in {1..30}; do
+    if curl -s http://localhost:8178/ > /dev/null 2>&1; then
+        echo "Whisper server is ready"
+        break
+    fi
+    sleep 1
+done
+
+# Start Diarization service
+echo "Starting Diarization service on port 8179..."
+cd /workspace/meeting-minutes/backend
+python3 -m uvicorn diarization_service.main:app \
+    --host 0.0.0.0 \
+    --port 8179 &
+
+echo ""
+echo "==========================================="
+echo "  Meetily GPU Services Started!"
+echo "==========================================="
+echo "  Ollama:       http://0.0.0.0:11434"
+echo "  Whisper:      http://0.0.0.0:8178"
+echo "  Diarization:  http://0.0.0.0:8179"
+echo "==========================================="
+echo ""
+echo "Usage:"
+echo "  - For LLM:                    POST to :11434/api/generate"
+echo "  - For transcription only:     POST to :8178/inference"
+echo "  - For transcription + speaker: POST to :8179/inference"
+echo "==========================================="
+
+# Keep running
+wait
+START_EOF
+
+# Test script
+RUN cat > /opt/meetily/test-gpu-services.sh << 'TEST_EOF'
+#!/bin/bash
+echo "Testing services..."
+echo ""
+
+# Test Ollama
+OLLAMA_TAGS=$(curl -s http://localhost:11434/api/tags 2>/dev/null)
+if [ -n "$OLLAMA_TAGS" ]; then
+    echo "Ollama (11434): OK"
+    echo "  Models: $OLLAMA_TAGS"
+else
+    echo "Ollama (11434): FAILED"
+fi
+
+# Test Whisper
+if curl -s http://localhost:8178/ > /dev/null 2>&1; then
+    echo "Whisper (8178): OK"
+else
+    echo "Whisper (8178): FAILED"
+fi
+
+# Test Diarization
+DIARIZE_HEALTH=$(curl -s http://localhost:8179/health 2>/dev/null)
+if [ -n "$DIARIZE_HEALTH" ]; then
+    echo "Diarization (8179): OK"
+    echo "  Status: $DIARIZE_HEALTH"
+else
+    echo "Diarization (8179): FAILED"
+fi
+TEST_EOF
+
+RUN chmod +x /opt/meetily/*.sh
+
+# -----------------------------------------------------------------------------
+# 4. Expose Ports
+# -----------------------------------------------------------------------------
+EXPOSE 8178 8179 11434
+
+CMD ["/opt/meetily/start-gpu-services.sh"]
