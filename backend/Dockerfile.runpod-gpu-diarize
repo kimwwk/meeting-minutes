@@ -1,14 +1,15 @@
 # =============================================================================
-# Meetily RunPod GPU Services - With Speaker Diarization
-# Whisper.cpp + Pyannote Speaker Diarization
+# Meetily RunPod GPU Services - With Speaker Diarization + Ollama
+# Whisper.cpp + Pyannote Speaker Diarization + Ollama LLM
 # =============================================================================
 FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 LABEL maintainer="Meetily"
-LABEL description="GPU-accelerated Whisper + Speaker Diarization"
+LABEL description="GPU-accelerated Whisper + Speaker Diarization + Ollama"
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV WHISPER_MODEL=base.en
+ENV OLLAMA_MODEL=llama3.2:3b
 
 # -----------------------------------------------------------------------------
 # 1. Install System Dependencies
@@ -120,6 +121,26 @@ else
     echo "Warning: HF_AUTH_TOKEN not set. Pyannote model will be loaded on first use."
 fi
 
+# Install Ollama if not present
+if [ ! -f "/usr/local/bin/ollama" ]; then
+    echo "Installing Ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh
+fi
+
+# Pull Ollama models
+echo "Starting Ollama to pull models..."
+ollama serve &
+OLLAMA_PID=$!
+sleep 5
+
+echo "Pulling Ollama model: llama3.2:3b..."
+ollama pull llama3.2:3b || echo "Warning: Could not pull llama3.2:3b"
+
+echo "Pulling Ollama model: deepseek-r1:32b..."
+ollama pull deepseek-r1:32b || echo "Warning: Could not pull deepseek-r1:32b"
+
+kill $OLLAMA_PID 2>/dev/null || true
+
 touch "$SETUP_MARKER"
 echo "Setup complete!"
 SETUP_EOF
@@ -128,15 +149,35 @@ SETUP_EOF
 RUN cat > /opt/meetily/start-gpu-services.sh << 'START_EOF'
 #!/bin/bash
 
-echo "Starting Meetily GPU Services with Diarization..."
+echo "Starting Meetily GPU Services with Diarization + Ollama..."
 
 # Run setup if first boot
 /opt/meetily/setup-gpu-services.sh
 
 # Set environment
 export WHISPER_MODEL=${WHISPER_MODEL:-base.en}
+export OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
 export WHISPER_SERVER_URL=http://localhost:8178
 export HF_AUTH_TOKEN=${HF_AUTH_TOKEN:-}
+
+# Start Ollama server
+echo "Starting Ollama server on port 11434..."
+ollama serve &
+
+# Wait for Ollama to be ready
+echo "Waiting for Ollama server..."
+for i in {1..30}; do
+    if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+        echo "Ollama server is ready"
+        break
+    fi
+    sleep 1
+done
+
+# Ensure models are pulled
+echo "Ensuring Ollama models are available..."
+ollama pull llama3.2:3b 2>/dev/null || echo "llama3.2:3b already available"
+ollama pull deepseek-r1:32b 2>/dev/null || echo "deepseek-r1:32b already available or downloading"
 
 # Start Whisper server
 echo "Starting Whisper server on port 8178..."
@@ -168,13 +209,15 @@ echo ""
 echo "==========================================="
 echo "  Meetily GPU Services Started!"
 echo "==========================================="
+echo "  Ollama:       http://0.0.0.0:11434"
 echo "  Whisper:      http://0.0.0.0:8178"
 echo "  Diarization:  http://0.0.0.0:8179"
 echo "==========================================="
 echo ""
 echo "Usage:"
-echo "  - For transcription only: POST to :8178/inference"
-echo "  - For transcription + speaker ID: POST to :8179/inference"
+echo "  - For LLM:                    POST to :11434/api/generate"
+echo "  - For transcription only:     POST to :8178/inference"
+echo "  - For transcription + speaker: POST to :8179/inference"
 echo "==========================================="
 
 # Keep running
@@ -186,6 +229,15 @@ RUN cat > /opt/meetily/test-gpu-services.sh << 'TEST_EOF'
 #!/bin/bash
 echo "Testing services..."
 echo ""
+
+# Test Ollama
+OLLAMA_TAGS=$(curl -s http://localhost:11434/api/tags 2>/dev/null)
+if [ -n "$OLLAMA_TAGS" ]; then
+    echo "Ollama (11434): OK"
+    echo "  Models: $OLLAMA_TAGS"
+else
+    echo "Ollama (11434): FAILED"
+fi
 
 # Test Whisper
 if curl -s http://localhost:8178/ > /dev/null 2>&1; then
@@ -209,6 +261,6 @@ RUN chmod +x /opt/meetily/*.sh
 # -----------------------------------------------------------------------------
 # 4. Expose Ports
 # -----------------------------------------------------------------------------
-EXPOSE 8178 8179
+EXPOSE 8178 8179 11434
 
 CMD ["/opt/meetily/start-gpu-services.sh"]
