@@ -154,15 +154,23 @@ echo "Starting Meetily GPU Services with Diarization + Ollama..."
 # Run setup if first boot
 /opt/meetily/setup-gpu-services.sh
 
+# Re-install Ollama if missing (RunPod clears /usr on restart)
+if ! command -v ollama &> /dev/null; then
+    echo "Ollama not found. Reinstalling..."
+    curl -fsSL https://ollama.com/install.sh | sh
+fi
+
 # Set environment
 export WHISPER_MODEL=${WHISPER_MODEL:-base.en}
 export OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:3b}
+export OLLAMA_HOST=0.0.0.0:11434
 export WHISPER_SERVER_URL=http://localhost:8178
 export HF_AUTH_TOKEN=${HF_AUTH_TOKEN:-}
 
 # Start Ollama server
 echo "Starting Ollama server on port 11434..."
 ollama serve &
+sleep 5
 
 # Wait for Ollama to be ready
 echo "Waiting for Ollama server..."
@@ -177,7 +185,6 @@ done
 # Ensure models are pulled
 echo "Ensuring Ollama models are available..."
 ollama pull llama3.2:3b 2>/dev/null || echo "llama3.2:3b already available"
-ollama pull deepseek-r1:32b 2>/dev/null || echo "deepseek-r1:32b already available or downloading"
 
 # Start Whisper server
 echo "Starting Whisper server on port 8178..."

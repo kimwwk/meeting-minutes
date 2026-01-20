@@ -1,0 +1,152 @@
+# =============================================================================
+# Meetily RunPod GPU Services - Lite Dockerfile
+# Compiles whisper.cpp on first boot (not during build)
+# =============================================================================
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+
+LABEL maintainer="Meetily"
+LABEL description="GPU-accelerated Whisper + Ollama for meeting transcription (lite)"
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV WHISPER_MODEL=base.en
+
+# -----------------------------------------------------------------------------
+# 1. Install System Dependencies Only
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    wget \
+    curl \
+    ffmpeg \
+    pkg-config \
+    libsdl2-dev \
+    zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# 2. Create Scripts Directory (NOT in /workspace - RunPod clears that)
+# -----------------------------------------------------------------------------
+RUN mkdir -p /opt/meetily
+
+# Setup script - runs once on first boot
+RUN cat > /opt/meetily/setup-gpu-services.sh << 'SETUP_EOF'
+#!/bin/bash
+set -e
+
+SETUP_MARKER="/workspace/.setup_complete"
+
+if [ -f "$SETUP_MARKER" ]; then
+    echo "Setup already complete. Skipping..."
+    exit 0
+fi
+
+echo "============================================"
+echo "  First Boot Setup - This takes ~10-15 min"
+echo "============================================"
+
+# Clone repo
+if [ ! -d "/workspace/meeting-minutes" ]; then
+    echo "Cloning repository..."
+    cd /workspace
+    git clone https://github.com/Zackriya-Solutions/meeting-minutes.git
+    cd meeting-minutes
+    git submodule update --init --recursive
+fi
+
+# Build whisper.cpp with CUDA
+echo "Building whisper.cpp with CUDA support..."
+cd /workspace/meeting-minutes/backend/whisper.cpp
+cmake -B build \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DWHISPER_BUILD_SERVER=ON \
+    -DWHISPER_BUILD_EXAMPLES=ON \
+    -DWHISPER_BUILD_TESTS=OFF \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DGGML_STATIC=ON \
+    -DGGML_CUDA=ON \
+    -DGGML_NATIVE=OFF
+cmake --build build --config Release --target whisper-server -j$(nproc)
+
+# Download model
+echo "Downloading Whisper model (${WHISPER_MODEL})..."
+mkdir -p /workspace/meeting-minutes/backend/models
+wget -q --show-progress -O "/workspace/meeting-minutes/backend/models/ggml-${WHISPER_MODEL}.bin" \
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${WHISPER_MODEL}.bin"
+
+# Install Ollama
+if ! command -v ollama &> /dev/null; then
+    echo "Installing Ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh
+fi
+
+touch "$SETUP_MARKER"
+echo "Setup complete!"
+SETUP_EOF
+
+# Start script - runs setup if needed, then starts services
+RUN cat > /opt/meetily/start-gpu-services.sh << 'START_EOF'
+#!/bin/bash
+
+echo "Starting Meetily GPU Services..."
+
+# Run setup if first boot
+/opt/meetily/setup-gpu-services.sh
+
+# Re-install Ollama if missing (RunPod clears /usr on restart)
+if ! command -v ollama &> /dev/null; then
+    echo "Ollama not found. Reinstalling..."
+    curl -fsSL https://ollama.com/install.sh | sh
+fi
+
+# Set environment
+export WHISPER_MODEL=${WHISPER_MODEL:-base.en}
+export OLLAMA_HOST=0.0.0.0:11434
+
+# Start Ollama
+echo "Starting Ollama on port 11434..."
+ollama serve &
+sleep 5
+
+# Pull model
+echo "Pulling Ollama model (llama3.2:3b)..."
+ollama pull llama3.2:3b 2>/dev/null || true
+
+# Start Whisper server
+echo "Starting Whisper server on port 8178..."
+cd /workspace/meeting-minutes/backend/whisper.cpp
+./build/bin/whisper-server \
+    --model /workspace/meeting-minutes/backend/models/ggml-${WHISPER_MODEL}.bin \
+    --host 0.0.0.0 \
+    --port 8178 \
+    --threads 4 &
+
+echo ""
+echo "=========================================="
+echo "  Meetily GPU Services Started!"
+echo "=========================================="
+echo "  Whisper: http://0.0.0.0:8178"
+echo "  Ollama:  http://0.0.0.0:11434"
+echo "=========================================="
+
+# Keep running
+wait
+START_EOF
+
+# Test script
+RUN cat > /opt/meetily/test-gpu-services.sh << 'TEST_EOF'
+#!/bin/bash
+echo "Testing services..."
+curl -s http://localhost:8178/ && echo "Whisper: OK" || echo "Whisper: FAILED"
+curl -s http://localhost:11434/api/tags && echo "Ollama: OK" || echo "Ollama: FAILED"
+TEST_EOF
+
+RUN chmod +x /opt/meetily/*.sh
+
+# -----------------------------------------------------------------------------
+# 3. Expose Ports
+# -----------------------------------------------------------------------------
+EXPOSE 8178 11434
+
+CMD ["/opt/meetily/start-gpu-services.sh"]
