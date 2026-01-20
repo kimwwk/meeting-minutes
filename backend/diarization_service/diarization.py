@@ -62,12 +62,13 @@ class DiarizationService:
         """Check if diarization pipeline is available."""
         return self.pipeline is not None
 
-    def get_speaker_turns(self, audio_path: str) -> List[Dict[str, Any]]:
+    def get_speaker_turns(self, audio_path: str, num_speakers: Optional[int] = None) -> List[Dict[str, Any]]:
         """
         Perform speaker diarization on an audio file.
 
         Args:
             audio_path: Path to the audio file (should be WAV 16kHz mono)
+            num_speakers: Optional hint for number of speakers (constrains pyannote output)
 
         Returns:
             List of speaker turns with format:
@@ -78,10 +79,14 @@ class DiarizationService:
             return []
 
         try:
-            logger.info(f"Running diarization on: {audio_path}")
+            logger.info(f"Running diarization on: {audio_path}" +
+                       (f" (num_speakers={num_speakers})" if num_speakers else ""))
 
-            # Run diarization
-            diarization_result = self.pipeline(audio_path)
+            # Run diarization with optional speaker count constraint
+            if num_speakers:
+                diarization_result = self.pipeline(audio_path, num_speakers=num_speakers)
+            else:
+                diarization_result = self.pipeline(audio_path)
 
             # Extract speaker turns
             speaker_turns = []

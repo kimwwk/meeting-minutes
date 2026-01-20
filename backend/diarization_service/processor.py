@@ -121,7 +121,8 @@ class AudioProcessor:
 
                 if conversion_success:
                     diarization_turns = self.diarization_service.get_speaker_turns(
-                        temp_wav_path
+                        temp_wav_path,
+                        num_speakers=num_speakers
                     )
                     logger.info(f"Got {len(diarization_turns)} speaker turns")
 
