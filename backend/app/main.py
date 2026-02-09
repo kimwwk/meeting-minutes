@@ -12,6 +12,9 @@ from threading import Lock
 from transcript_processor import TranscriptProcessor
 import time
 
+# Import custom templates router
+from custom_templates import router as custom_templates_router
+
 # Load environment variables
 load_dotenv()
 
@@ -71,6 +74,9 @@ app.add_middleware(
 
 # Global database manager instance for meeting management endpoints
 db = DatabaseManager()
+
+# Include custom templates router
+app.include_router(custom_templates_router)
 
 # New Pydantic models for meeting management
 class Transcript(BaseModel):
